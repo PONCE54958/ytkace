@@ -670,15 +670,28 @@ static UIView *YTKACEFullscreenAnchor(UIView *root) {
 
 // right and centerY are in the coordinates of the row's own superview.
 static void YTKACEPlaceZoneStack(UIStackView *stack, UIView *overlay, CGFloat right, CGFloat centerY) {
-    CGSize size = [stack systemLayoutSizeFittingSize:UILayoutFittingCompressedSize];
-    size.height = 40.0;
+    CGSize content = [stack systemLayoutSizeFittingSize:UILayoutFittingCompressedSize];
+    content.height = 40.0;
     const CGFloat minimum = stack.superview == overlay
         ? CGRectGetMinX(overlay.safeAreaLayoutGuide.layoutFrame) + 8.0 : 8.0;
-    const CGFloat left = MAX(minimum, right - size.width);
-    CGRect frame = CGRectMake(left, round(centerY - size.height * 0.5), right - left, size.height);
-    if (!CGRectEqualToRect(stack.frame, frame)) {
+    const CGFloat available = MAX(0.0, right - minimum);
+    // Narrowing the frame made UIStackView compress single buttons, so sizes
+    // stopped matching and anything that spilled out of the frame ignored
+    // taps. Keep the row at its content size and scale the whole row only
+    // when it cannot fit.
+    const CGFloat scale = content.width > available && content.width > 0.0
+        ? available / content.width : 1.0;
+    const CGRect bounds = CGRectMake(0.0, 0.0, ceil(content.width), content.height);
+    const CGPoint center = CGPointMake(right - content.width * scale * 0.5, centerY);
+    const CGAffineTransform transform = scale < 0.999
+        ? CGAffineTransformMakeScale(scale, scale) : CGAffineTransformIdentity;
+    if (!CGRectEqualToRect(stack.bounds, bounds) ||
+        !CGPointEqualToPoint(stack.center, center) ||
+        !CGAffineTransformEqualToTransform(stack.transform, transform)) {
         [UIView performWithoutAnimation:^{
-            stack.frame = frame;
+            stack.transform = transform;
+            stack.bounds = bounds;
+            stack.center = center;
             [stack layoutIfNeeded];
         }];
     }
@@ -1321,6 +1334,43 @@ void YTKACEOverlayButtonResized(UIButton *button) {
     dispatch_async(dispatch_get_main_queue(), ^{ [owner setNeedsLayout]; });
 }
 
+// Liquid Glass behind YTKACE's own player buttons, so they match the player's
+// frosted surfaces when the Player glass option is on.
+static const void *YTKACEOverlayGlassAssociation = &YTKACEOverlayGlassAssociation;
+
+static void YTKACERefreshOverlayGlass(UIButton *button) {
+    if (button == nil) return;
+    UIVisualEffectView *glass = objc_getAssociatedObject(button, YTKACEOverlayGlassAssociation);
+    const BOOL wanted = YTKACELiquidGlassAvailable() &&
+        YTKACEFeatureEnabled(@"YTKACE.Preference.Glass.Player");
+    if (!wanted) {
+        if (glass != nil) {
+            [glass removeFromSuperview];
+            objc_setAssociatedObject(button, YTKACEOverlayGlassAssociation, nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return;
+    }
+    if (glass == nil) {
+        Class effectClass = NSClassFromString(@"UIGlassEffect");
+        SEL styleSelector = NSSelectorFromString(@"effectWithStyle:");
+        UIVisualEffect *effect = [effectClass respondsToSelector:styleSelector]
+            ? ((id (*)(id, SEL, NSInteger))objc_msgSend)(effectClass, styleSelector, 0)
+            : [effectClass new];
+        if (effect == nil) return;
+        glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+        glass.userInteractionEnabled = NO;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve = kCACornerCurveContinuous;
+        objc_setAssociatedObject(button, YTKACEOverlayGlassAssociation, glass,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (glass.superview != button) [button insertSubview:glass atIndex:0];
+    if (!CGRectEqualToRect(glass.frame, button.bounds)) glass.frame = button.bounds;
+    const CGFloat radius = MIN(CGRectGetWidth(button.bounds), CGRectGetHeight(button.bounds)) * 0.5;
+    if (glass.layer.cornerRadius != radius) glass.layer.cornerRadius = radius;
+}
+
 UIButton *YTKACEOverlayButton(UIStackView *stack,
                               NSString *identifier,
                               NSString *symbolName,
@@ -1398,6 +1448,25 @@ static void YTKACEControlsOverlayLayout(UIView *receiver, SEL selector) {
         configurator(receiver, stacks[YTKACEOverlayButtonZone(identifier)] ?: stack);
     }
     YTKACECurrentOverlayGroup = nil;
+    // Turning one of our buttons off left it in the row until the overlay was
+    // rebuilt, so the option looked broken. Drop it on the next layout pass.
+    for (NSString *zone in stacks) {
+        UIStackView *row = stacks[zone];
+        for (UIView *item in [row.arrangedSubviews copy]) {
+            NSString *identifier = item.accessibilityIdentifier;
+            BOOL known = NO;
+            for (NSDictionary *button in YTKACEOverlayButtonCatalog()) {
+                if ([button[@"id"] isEqualToString:identifier]) {
+                    known = YES;
+                    break;
+                }
+            }
+            if (known && !YTKACEOverlayButtonEnabled(identifier)) {
+                [row removeArrangedSubview:item];
+                [item removeFromSuperview];
+            }
+        }
+    }
     for (NSString *zone in stacks) YTKACESortZoneStack(stacks[zone], zone);
     YTKACEOrderNativeTopRow(receiver, stacks.allValues, stacks[YTKACEOverlayZoneTop]);
     BOOL aligned = YTKACEAlignOverlayStack(receiver, stack);
@@ -1416,6 +1485,15 @@ static void YTKACEControlsOverlayLayout(UIView *receiver, SEL selector) {
     // Always laid out: it also clears the room in YouTube's pill when empty.
     fullscreen.hidden = !YTKACELayoutFullscreenStack(receiver, fullscreen);
     stacks[YTKACEOverlayZoneMenu].hidden = YES;
+
+    // Glass follows the row geometry, so refresh it once the rows are placed.
+    for (NSString *zone in stacks) {
+        for (UIView *item in stacks[zone].arrangedSubviews) {
+            if ([item isKindOfClass:UIButton.class]) {
+                YTKACERefreshOverlayGlass((UIButton *)item);
+            }
+        }
+    }
 
     // Last, so the laptop-posture split moves the final positions.
     YTKACEDuoDeskControlsLayout(receiver);
