@@ -34,6 +34,7 @@ static const void *YTKACEOverlayRetryAssociation = &YTKACEOverlayRetryAssociatio
 static NSString *YTKACECurrentOverlayGroup;
 static NSMutableArray<NSDictionary *> *YTKACEOverlayConfigurators;
 static BOOL YTKACENativeControlsVisible = YES;
+static void YTKACEAnimateRowGlass(UIView *row, BOOL visible);
 
 static void YTKACEFindSettingsControlInView(UIView *view,
                                             UIView *excluded,
@@ -226,6 +227,7 @@ static void YTKACESetHostedControlsHidden(UIView *view, BOOL hidden) {
                                     UIViewAnimationOptionAllowUserInteraction
                          animations:^{
             view.alpha = visible ? 1.0 : 0.0;
+            YTKACEAnimateRowGlass(view, visible);
         } completion:nil];
         return;
     }
@@ -1427,7 +1429,29 @@ static BOOL YTKACERowIsInFullscreenPill(UIStackView *row) {
     return [NSStringFromClass(row.superview.class) isEqualToString:@"YTFullscreenActionsView"];
 }
 
-static void YTKACERefreshOverlayRowGlass(UIStackView *row) {
+// YouTube's top buttons in our row's band: cast, captions and the rest.
+// They are not in our stack, but they share the row and must sit on the same
+// glass, so their frames are added to the capsule.
+static void YTKACECollectBandControls(UIView *view, UIView *overlay, NSArray<UIView *> *excluded,
+                                      CGFloat rowY, NSMutableArray<UIView *> *found, int depth) {
+    if (depth > 12 || view.hidden || view.alpha < 0.05 || [excluded containsObject:view]) return;
+    NSString *name = NSStringFromClass(view.class);
+    if ([view isKindOfClass:UIControl.class] || [name containsString:@"Button"] ||
+        [name containsString:@"Switch"] || [name containsString:@"Toggle"]) {
+        const CGRect frame = [view convertRect:view.bounds toView:overlay];
+        if (CGRectGetWidth(frame) > 4.0 && CGRectGetWidth(frame) < 140.0 &&
+            fabs(CGRectGetMidY(frame) - rowY) < 14.0 &&
+            CGRectGetMidX(frame) > CGRectGetWidth(overlay.bounds) * 0.4 &&
+            YTKACEViewShown(view)) {
+            [found addObject:view];
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        YTKACECollectBandControls(subview, overlay, excluded, rowY, found, depth + 1);
+    }
+}
+
+static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
     if (row == nil) return;
     NSMutableArray<UIVisualEffectView *> *glasses =
         objc_getAssociatedObject(row, YTKACEOverlayRowGlassAssociation);
@@ -1445,37 +1469,56 @@ static void YTKACERefreshOverlayRowGlass(UIStackView *row) {
     if (YTKACERowIsInFullscreenPill(row)) return;
     [row layoutIfNeeded];
 
-    // Visible icons in the row's own coordinates. Runs stay together while
-    // they touch; a gap wide enough for a YouTube button starts a new capsule,
-    // so a row mixed with YouTube's buttons never covers them.
-    NSMutableArray<NSMutableArray<UIView *> *> *runs = [NSMutableArray array];
-    const BOOL vertical = row.axis == UILayoutConstraintAxisVertical;
+    // One capsule for the whole row: the union of our icons plus the YouTube
+    // ones that share the row. It lives on the overlay, below every button,
+    // so YouTube's cast and captions icons stay sharp on top of the glass
+    // instead of being blurred by a surface inside our row.
+    UIView *overlay = objc_getAssociatedObject(row, YTKACEOverlayOwnerAssociation) ?: row.superview;
+    if (overlay == nil) return;
+    BOOL any = NO;
+    CGRect surface = CGRectZero;
     for (UIView *item in row.arrangedSubviews) {
         if (item.hidden || item.alpha < 0.05 || CGRectIsEmpty(item.frame)) continue;
-        NSMutableArray<UIView *> *run = runs.lastObject;
-        UIView *previous = run.lastObject;
-        const CGFloat gap = previous == nil ? 0.0
-            : (vertical ? CGRectGetMinY(item.frame) - CGRectGetMaxY(previous.frame)
-                        : CGRectGetMinX(item.frame) - CGRectGetMaxX(previous.frame));
-        if (run == nil || gap > 24.0) {
-            run = [NSMutableArray array];
-            [runs addObject:run];
+        const CGRect frame = [item convertRect:item.bounds toView:overlay];
+        if (CGRectIsEmpty(frame)) continue;
+        surface = any ? CGRectUnion(surface, frame) : frame;
+        any = YES;
+    }
+    if (!any) return;
+
+    if ([zone isEqualToString:YTKACEOverlayZoneTop]) {
+        NSDictionary *allStacks =
+            objc_getAssociatedObject(overlay, YTKACEOverlayZoneStacksAssociation);
+        const CGRect rowFrame = [row convertRect:row.bounds toView:overlay];
+        NSMutableArray<UIView *> *band = [NSMutableArray array];
+        YTKACECollectBandControls(overlay, overlay, allStacks.allValues,
+                                  CGRectGetMidY(rowFrame), band, 0);
+        for (UIView *native in band) {
+            surface = CGRectUnion(surface, [native convertRect:native.bounds toView:overlay]);
         }
-        [run addObject:item];
+    } else if ([zone isEqualToString:YTKACEOverlayZoneBottom]) {
+        UIView *fullscreen = YTKACEFullscreenAnchor(overlay.superview ?: overlay);
+        if (fullscreen != nil && YTKACEViewShown(fullscreen)) {
+            surface = CGRectUnion(surface, [fullscreen convertRect:fullscreen.bounds toView:overlay]);
+        }
     }
 
-    for (NSMutableArray<UIView *> *run in runs) {
-        CGRect surface = run.firstObject.frame;
-        for (UIView *item in run) surface = CGRectUnion(surface, item.frame);
-        if (CGRectIsEmpty(surface)) continue;
-        UIVisualEffectView *glass = YTKACENewRowGlass();
-        if (glass == nil) return;
-        glass.frame = surface;
-        glass.layer.cornerRadius = MIN(CGRectGetWidth(surface), CGRectGetHeight(surface)) * 0.5;
-        [row insertSubview:glass atIndex:0];
-        [row sendSubviewToBack:glass];
-        [glasses addObject:glass];
-    }
+    if (CGRectIsEmpty(surface)) return;
+    UIVisualEffectView *glass = YTKACENewRowGlass();
+    if (glass == nil) return;
+    glass.frame = surface;
+    glass.alpha = row.alpha;
+    glass.layer.cornerRadius = MIN(CGRectGetWidth(surface), CGRectGetHeight(surface)) * 0.5;
+    [overlay insertSubview:glass atIndex:0];
+    [overlay sendSubviewToBack:glass];
+    [glasses addObject:glass];
+}
+
+// The overlay-level glass is not inside the row, so it does not fade with it
+// on its own; call from the same animation block as the row's alpha.
+static void YTKACEAnimateRowGlass(UIView *row, BOOL visible) {
+    NSArray<UIView *> *glasses = objc_getAssociatedObject(row, YTKACEOverlayRowGlassAssociation);
+    for (UIView *glass in glasses) glass.alpha = visible ? 1.0 : 0.0;
 }
 
 // YouTube hides the gear with the rest of the controls when they fade out,
@@ -1658,7 +1701,7 @@ static void YTKACEControlsOverlayLayout(UIView *receiver, SEL selector) {
                 YTKACERefreshOverlayGlyph((UIButton *)item);
             }
         }
-        YTKACERefreshOverlayRowGlass(row);
+        YTKACERefreshOverlayRowGlass(row, zone);
     }
 
     // Last, so the laptop-posture split moves the final positions.
