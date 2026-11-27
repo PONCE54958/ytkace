@@ -1843,6 +1843,8 @@ static NSDictionary *YTKACEPlayerDefinition(void) {
                                @"YTKACE.Preference.Overlay.AlwaysShowControls"),
             YTKACEToggle(@"Keep Play Button Visible", @"YTKACE.Preference.Overlay.AlwaysShowPlayPause", @"", @""),
             YTKACEToggle(@"Keep Progress Bar Visible", @"YTKACE.Preference.Overlay.ProgressAlwaysVisible", @"", @""),
+            YTKACEToggleDetail(@"Show End Time", @"Show when the video will end next to its length.",
+                               @"YTKACE.Preference.Overlay.EndTimeShown"),
             YTKACEToggleDetail(@"Remove Player Dimming",
                                @"Stop the video from darkening when the controls show.",
                                @"YTKACE.Preference.Overlay.DimmingRemoved"),
@@ -2003,7 +2005,9 @@ static NSDictionary *YTKACEFeedDefinition(void) {
                                @"Switches the tabbed Home redesign some accounts get back to the normal layout.",
                                @"YTKACE.Preference.Feed.HomeTabsHidden"),
             YTKACEToggleDetail(@"Remove Filter Chips", @"Hide the filter chips at the top of Home and Subscriptions.",
-                               @"YTKACE.Preference.Navigation.TopicsHidden")
+                               @"YTKACE.Preference.Navigation.TopicsHidden"),
+            YTKACEToggleDetail(@"Stop Feed Previews", @"Don't play videos in the feed when you scroll or rest a finger on them.",
+                               @"YTKACE.Preference.Feed.InlinePlaybackDisabled")
         ],
         @[
             YTKACEToggle(@"Remove Shorts Shelves", @"YTKACE.Preference.Shorts.FeedHidden", @"", @""),
@@ -2510,6 +2514,8 @@ NSArray<NSDictionary *> *YTKACEAllPageDefinitions(void) {
             YTKACEWithFooter(YTKACEToggle(@"iPhone Duo System Tab Bar", @"YTKACE.Preference.Tabs.DuoNativeBar", @"", @""),
                              @"Shows the tabs in the iPhone Duo's own tab bar: the vertical bar, which expands with labels when held, or the floating bar at the bottom when unfolded upright."),
             YTKACEToggle(@"Hide Tab Labels", @"YTKACE.Preference.Tabs.LabelsHidden", @"", @""),
+            YTKACEToggleDetail(@"Hide Tab Dots", @"Hide the red dot on tabs with new content.",
+                               @"YTKACE.Preference.Tabs.DotsHidden"),
             YTKACEToggle(@"Don't Open App in Shorts", @"YTKACE.Preference.Shorts.PreventAutoOpen", @"", @""),
             YTKACEPicker(@"Frosted Tab Bar", @"YTKACE.Preference.Tabs.Frosted",
                          @[@"Default", @"On", @"Off"], @[@0, @1, @2], 0, @"", @""),

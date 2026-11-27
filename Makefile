@@ -58,6 +58,7 @@ YTKACE_FILES = \
 	Tweak/Features/Playback/CaptionControls.mm \
 	Tweak/Features/Playback/TranscriptExport.mm \
 	Tweak/Features/Playback/SleepTimerControls.mm \
+	Tweak/Features/Playback/EndTime.mm \
 	Tweak/Features/Playback/DoubleTapHooks.mm \
 	Tweak/Features/Playback/VideoZoom.mm \
 	Tweak/Features/Playback/ProgressBarStyle.mm \
@@ -82,6 +83,7 @@ YTKACE_FILES = \
 	Vendor/DuoKit/DuoMirroredTabBar.m \
 	Vendor/DuoKit/DuoDeskPosture.m \
 	Tweak/Features/Playback/DuoDeskPlayer.mm \
+	Tweak/Features/Playback/DuoDeskPanel.mm \
 	Tweak/Features/Playback/DuoStatusBar.mm \
 	Tweak/Features/Navigation/GlassChrome.mm \
 	Tweak/Features/Navigation/GlassSheets.mm \

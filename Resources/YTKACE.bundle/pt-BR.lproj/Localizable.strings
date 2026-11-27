@@ -106,6 +106,8 @@
 "Helps recover playback in sideloaded builds." = "Ajuda a recuperar a reprodução em versões instaladas por sideload.";
 "Hide Status Bar" = "Ocultar barra de status";
 "Hide Tab Labels" = "Ocultar nomes das abas";
+"Hide Tab Dots" = "Ocultar pontos das abas";
+"Hide the red dot on tabs with new content." = "Oculta o ponto vermelho nas abas com conteúdo novo.";
 "Hold to Seek" = "Segurar para avançar";
 "Home" = "Início";
 "Import" = "Importar";
@@ -455,6 +457,8 @@
 "Invalid ZIP64 backup" = "Backup ZIP64 inválido";
 "Keep Captions On" = "Manter legendas ativadas";
 "Keep Progress Bar Visible" = "Manter barra de progresso visível";
+"Show End Time" = "Mostrar horário de término";
+"Show when the video will end next to its length." = "Mostra quando o vídeo vai terminar ao lado da duração.";
 "Language" = "Idioma";
 "Learning" = "Aprendizado";
 "Library" = "Biblioteca";
@@ -897,6 +901,8 @@
 "Normal Home Layout" = "Layout normal do Início";
 "Switches the tabbed Home redesign some accounts get back to the normal layout." = "Volta o redesign do Início com abas, que algumas contas recebem, para o layout normal.";
 "Remove Filter Chips" = "Ocultar filtros";
+"Stop Feed Previews" = "Parar prévias do feed";
+"Don't play videos in the feed when you scroll or rest a finger on them." = "Não reproduzir vídeos no feed ao rolar ou deixar o dedo sobre eles.";
 "Hide the filter chips at the top of Home and Subscriptions." = "Oculta os filtros no topo do Início e de Inscrições.";
 "Show a thin progress line at the bottom of Shorts." = "Mostra uma linha fina de progresso na parte de baixo dos Shorts.";
 "Play Shorts Once" = "Reproduzir Shorts uma vez";
@@ -1152,3 +1158,5 @@
 "Stops the progress bar on the lock screen and in Control Center from seeking." = "Impede que a barra de progresso da tela de bloqueio e da Central de Controle avance ou volte o vídeo.";
 "In ⋯ Menu" = "No menu ⋯";
 "Drop a button here to put it in ⋯." = "Solte um botão aqui para colocá-lo no ⋯.";
+"Fill Screen" = "Preencher tela";
+"Playback Settings" = "Configurações de reprodução";
