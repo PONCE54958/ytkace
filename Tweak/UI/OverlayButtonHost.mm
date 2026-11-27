@@ -15,6 +15,7 @@ static IMP OriginalControlsSetControlsVisible;
 static IMP OriginalVideoSetOverlayVisible;
 static IMP OriginalVideoSetControlsVisible;
 static IMP OriginalControlsSetHidden;
+static IMP OriginalControlsHitTest;
 static IMP OriginalPlayerBarHitTest;
 static NSHashTable<UIStackView *> *YTKACEBottomStacks;
 static NSHashTable<UIStackView *> *YTKACEFullscreenStacks;
@@ -278,13 +279,32 @@ static void YTKACEControlsSetHidden(UIView *receiver, SEL selector, BOOL hidden)
     YTKACEUpdateHostedVisibility(receiver, !hidden);
 }
 
+// Spans YouTube's buttons when ours sit between them; only our buttons take
+// taps, and a button that grew past a stale frame still does.
+@interface YTKACEPassThroughStackView : UIStackView
+@end
+
+@implementation YTKACEPassThroughStackView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.hidden || self.alpha < 0.05 || !self.userInteractionEnabled) return nil;
+    // A title grew after the row was measured: the button is drawn past the
+    // row's bounds, and pointInside: would make it visible but dead.
+    for (UIView *view in self.arrangedSubviews.reverseObjectEnumerator) {
+        if (view.hidden || view.alpha < 0.05 || !view.userInteractionEnabled) continue;
+        UIView *hit = [view hitTest:[view convertPoint:point fromView:self] withEvent:event];
+        if (hit != nil) return hit;
+    }
+    return nil;
+}
+@end
+
 static UIStackView *YTKACEStackForOverlay(UIView *overlay) {
     UIStackView *stack = objc_getAssociatedObject(overlay, YTKACEOverlayStackAssociation);
     if (stack != nil) {
         return stack;
     }
 
-    stack = [UIStackView new];
+    stack = [YTKACEPassThroughStackView new];
     stack.axis = UILayoutConstraintAxisHorizontal;
     stack.alignment = UIStackViewAlignmentCenter;
     stack.distribution = UIStackViewDistributionFill;
@@ -318,17 +338,6 @@ static UIStackView *YTKACEStackForOverlay(UIView *overlay) {
 
 static UIView *YTKACEPlayerBarHitTest(UIView *receiver, SEL selector, CGPoint point, UIEvent *event);
 static UIView *YTKACEFullscreenActionsHitTest(UIView *receiver, SEL selector, CGPoint point, UIEvent *event);
-
-// Spans YouTube's buttons when ours sit between them; only our buttons take taps.
-@interface YTKACEPassThroughStackView : UIStackView
-@end
-
-@implementation YTKACEPassThroughStackView
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    return hit == self ? nil : hit;
-}
-@end
 
 // The left column: top to bottom, starting a new column to the right when
 // it runs out of height. A group (speed's three buttons) stays in one column.
@@ -1334,15 +1343,61 @@ void YTKACEOverlayButtonResized(UIButton *button) {
     dispatch_async(dispatch_get_main_queue(), ^{ [owner setNeedsLayout]; });
 }
 
-// Liquid Glass behind YTKACE's own player buttons, so they match the player's
-// frosted surfaces when the Player glass option is on.
+// Liquid Glass behind every YTKACE player button: the player's own buttons
+// are glass on iOS 26, so ours must match whether or not the YouTube player
+// surfaces are set to glass.
 static const void *YTKACEOverlayGlassAssociation = &YTKACEOverlayGlassAssociation;
+static const void *YTKACEOverlayGlyphSourceAssociation = &YTKACEOverlayGlyphSourceAssociation;
+static const void *YTKACEOverlayGlyphResultAssociation = &YTKACEOverlayGlyphResultAssociation;
+
+// One visual size for every glyph. The features bring their own shapes (SF
+// Symbols at 20 or 21pt, 24pt assets, hand-drawn 22pt), which is why some
+// icons looked bigger than others. Draw them into the same 22pt-tall box,
+// keeping the aspect ratio and never wider than 30pt.
+static UIImage *YTKACEOverlayGlyph(UIImage *image) {
+    if (image == nil || image.size.width <= 0.0 || image.size.height <= 0.0) return image;
+    CGFloat scale = 22.0 / image.size.height;
+    CGSize size = CGSizeMake(ceil(image.size.width * scale), 22.0);
+    if (size.width > 30.0) {
+        scale = 30.0 / image.size.width;
+        size = CGSizeMake(30.0, ceil(image.size.height * scale));
+    }
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size
+                                                                             format:format];
+    UIImage *glyph = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        (void)context;
+        [image drawInRect:CGRectMake(0.0, 0.0, size.width, size.height)];
+    }];
+    return [glyph imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+static void YTKACERefreshOverlayGlyph(UIButton *button) {
+    UIImage *image = [button imageForState:UIControlStateNormal];
+    if (image == nil) {
+        objc_setAssociatedObject(button, YTKACEOverlayGlyphSourceAssociation, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(button, YTKACEOverlayGlyphResultAssociation, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    UIImage *source = objc_getAssociatedObject(button, YTKACEOverlayGlyphSourceAssociation);
+    UIImage *result = objc_getAssociatedObject(button, YTKACEOverlayGlyphResultAssociation);
+    if (image == source || image == result) return;
+    UIImage *glyph = YTKACEOverlayGlyph(image);
+    if (glyph == nil) return;
+    objc_setAssociatedObject(button, YTKACEOverlayGlyphSourceAssociation, image,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(button, YTKACEOverlayGlyphResultAssociation, glyph,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [button setImage:glyph forState:UIControlStateNormal];
+}
 
 static void YTKACERefreshOverlayGlass(UIButton *button) {
     if (button == nil) return;
     UIVisualEffectView *glass = objc_getAssociatedObject(button, YTKACEOverlayGlassAssociation);
-    const BOOL wanted = YTKACELiquidGlassAvailable() &&
-        YTKACEFeatureEnabled(@"YTKACE.Preference.Glass.Player");
+    const BOOL wanted = YTKACELiquidGlassAvailable();
     if (!wanted) {
         if (glass != nil) {
             [glass removeFromSuperview];
@@ -1369,6 +1424,60 @@ static void YTKACERefreshOverlayGlass(UIButton *button) {
     if (!CGRectEqualToRect(glass.frame, button.bounds)) glass.frame = button.bounds;
     const CGFloat radius = MIN(CGRectGetWidth(button.bounds), CGRectGetHeight(button.bounds)) * 0.5;
     if (glass.layer.cornerRadius != radius) glass.layer.cornerRadius = radius;
+}
+
+// YouTube hides the gear with the rest of the controls when they fade out,
+// but a layout that moves the top row can leave it hidden while the controls
+// are still up. With Remove Settings off, put it back in that case only.
+static void YTKACERestoreSettingsButton(UIView *overlay) {
+    if (overlay == nil || !YTKACENativeControlsVisible ||
+        YTKACEFeatureEnabled(@"YTKACE.Preference.Overlay.MoreButtonHidden")) return;
+    for (NSString *name in @[@"overflowButton", @"settingsButton"]) {
+        SEL selector = NSSelectorFromString(name);
+        if (![overlay respondsToSelector:selector]) continue;
+        id value = ((id (*)(id, SEL))objc_msgSend)(overlay, selector);
+        if (![value isKindOfClass:UIView.class]) continue;
+        UIView *button = value;
+        if (!button.hidden) continue;
+        button.hidden = NO;
+        button.userInteractionEnabled = YES;
+    }
+}
+
+static BOOL YTKACEViewTakesTouches(UIView *view) {
+    if (view.hidden || view.alpha < 0.05 || !view.userInteractionEnabled) return NO;
+    if ([view isKindOfClass:UIControl.class]) return YES;
+    for (UIGestureRecognizer *recognizer in view.gestureRecognizers) {
+        if (recognizer.enabled) return YES;
+    }
+    return NO;
+}
+
+static UIView *YTKACEControlUnderPoint(UIView *view, UIView *overlay, CGPoint point, int depth) {
+    if (depth > 14 || view.hidden || view.alpha < 0.05 || !view.userInteractionEnabled) return nil;
+    for (UIView *subview in view.subviews.reverseObjectEnumerator) {
+        if (!CGRectContainsPoint(subview.bounds, [subview convertPoint:point fromView:overlay])) continue;
+        UIView *found = YTKACEControlUnderPoint(subview, overlay, point, depth + 1);
+        if (found != nil) return found;
+    }
+    if ([view isKindOfClass:UIControl.class] && view.window != nil) {
+        const CGRect frame = [view convertRect:view.bounds toView:overlay];
+        if (CGRectGetWidth(frame) >= 16.0 && CGRectGetWidth(frame) <= 140.0 &&
+            CGRectGetHeight(frame) >= 16.0 && CGRectGetHeight(frame) <= 140.0) return view;
+    }
+    return nil;
+}
+
+// Reordering the top row pins YouTube's buttons in place; a leftover view at
+// the old spot can sit over the visible button and eat its tap. When the hit
+// view is not interactive, hand the tap to the control drawn under it.
+static UIView *YTKACEControlsHitTest(UIView *receiver, SEL selector, CGPoint point, UIEvent *event) {
+    UIView *hit = ((UIView *(*)(id, SEL, CGPoint, UIEvent *))OriginalControlsHitTest)(
+        receiver, selector, point, event);
+    if (hit == nil || hit == receiver || YTKACEViewTakesTouches(hit)) return hit;
+    if (point.y > CGRectGetHeight(receiver.bounds) * 0.35) return hit;
+    UIView *control = YTKACEControlUnderPoint(receiver, receiver, point, 0);
+    return control != nil ? control : hit;
 }
 
 UIButton *YTKACEOverlayButton(UIStackView *stack,
@@ -1434,6 +1543,8 @@ static void YTKACEControlsOverlayLayout(UIView *receiver, SEL selector) {
     if (OriginalControlsOverlayLayout != NULL) {
         ((void (*)(id, SEL))OriginalControlsOverlayLayout)(receiver, selector);
     }
+    // The gear has to be up before the rows are measured around it.
+    YTKACERestoreSettingsButton(receiver);
 
     NSDictionary<NSString *, UIStackView *> *stacks = YTKACEZoneStacks(receiver);
     UIStackView *stack = stacks[YTKACEOverlayZoneBelow];
@@ -1486,10 +1597,12 @@ static void YTKACEControlsOverlayLayout(UIView *receiver, SEL selector) {
     fullscreen.hidden = !YTKACELayoutFullscreenStack(receiver, fullscreen);
     stacks[YTKACEOverlayZoneMenu].hidden = YES;
 
-    // Glass follows the row geometry, so refresh it once the rows are placed.
+    // Glass follows the row geometry, so refresh it once the rows are placed;
+    // every glyph is redrawn to the same size here too.
     for (NSString *zone in stacks) {
         for (UIView *item in stacks[zone].arrangedSubviews) {
             if ([item isKindOfClass:UIButton.class]) {
+                YTKACERefreshOverlayGlyph((UIButton *)item);
                 YTKACERefreshOverlayGlass((UIButton *)item);
             }
         }
@@ -1546,6 +1659,10 @@ void YTKACERegisterOverlayConfigurator(NSString *identifier,
                               @"setHidden:",
                               (IMP)YTKACEControlsSetHidden,
                               &OriginalControlsSetHidden);
+    YTKACEInstallInstanceHook(@"YTMainAppControlsOverlayView",
+                              @"hitTest:withEvent:",
+                              (IMP)YTKACEControlsHitTest,
+                              &OriginalControlsHitTest);
 }
 
 static UIViewController *YTKACESheetPresenter(UIView *sourceView) {

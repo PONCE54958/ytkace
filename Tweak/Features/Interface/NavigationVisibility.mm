@@ -98,6 +98,35 @@ static BOOL YTKACEIsMessagesToken(NSString *token) {
         [token containsString:@"inboxbutton"];
 }
 
+// YouTube labels its top bar buttons in the app language, and the settings
+// labels are translated, so "notifications" alone left the bell on screen in
+// Spanish and every other language. Match the word in each supported language.
+static BOOL YTKACENotificationToken(NSString *token) {
+    for (NSString *word in @[
+             @"notification", @"notific", @"notificaç", @"benachrichtig",
+             @"powiadomie", @"уведомл", @"bildirim", @"通知", @"알림",
+             @"ئاگادار", @"melding", @"ilmoitus", @"varsel", @"thông báo",
+             @"thong bao", @"bell", @"campana", @"cloche", @"glocke",
+             @"klokke", @"kello", @"zil"
+         ]) {
+        if ([token containsString:word]) return YES;
+    }
+    return NO;
+}
+
+static BOOL YTKACEInsideHeaderBar(UIView *view) {
+    for (UIView *current = view; current != nil; current = current.superview) {
+        NSString *name = NSStringFromClass(current.class).lowercaseString;
+        if ([name containsString:@"rightnavigation"] ||
+            [name containsString:@"headernavigation"] ||
+            [name containsString:@"topbar"] ||
+            [name containsString:@"appheader"]) return YES;
+    }
+    if (view.window == nil) return NO;
+    const CGRect frame = [view convertRect:view.bounds toView:view.window];
+    return CGRectGetWidth(frame) > 0.0 && CGRectGetMaxY(frame) <= 160.0;
+}
+
 static id YTKACENavigationButton(id receiver, SEL selector) {
     IMP original = YTKACENavigationOriginal(receiver, selector);
     id value = original == NULL
@@ -243,8 +272,7 @@ static BOOL YTKACENavigationShouldHide(UIView *view) {
         return YES;
     }
     if (YTKACEFeatureEnabled(@"YTKACE.Preference.Navigation.NotificationsHidden") &&
-        ([token containsString:@"notification"] ||
-         [token containsString:@"bell"])) {
+        YTKACENotificationToken(token)) {
         return YES;
     }
     if (YTKACEFeatureEnabled(@"YTKACE.Preference.Navigation.MessagesHidden") &&
@@ -263,8 +291,7 @@ static BOOL YTKACEIsNavigationIcon(UIView *view) {
         [token containsString:@"avatar"] ||
         [token containsString:@"profile"] ||
         [token containsString:@"logo"]) return NO;
-    if ([token containsString:@"notification"] ||
-        [token containsString:@"bell"] ||
+    if ((YTKACEInsideHeaderBar(view) && YTKACENotificationToken(token)) ||
         [token containsString:@"search"] ||
         [token containsString:@"cast"] ||
         [token containsString:@"airplay"] ||
@@ -519,8 +546,7 @@ static NSString *YTKACEQTMButtonHideKey(UIView *receiver) {
         [label isEqualToString:@"search"]) {
         return @"YTKACE.Preference.Navigation.SearchHidden";
     }
-    if ([label isEqualToString:@"notifications"] ||
-        [label isEqualToString:@"notification"]) {
+    if (YTKACENotificationToken(label) && YTKACEInsideHeaderBar(receiver)) {
         return @"YTKACE.Preference.Navigation.NotificationsHidden";
     }
     return nil;
@@ -545,7 +571,7 @@ static void YTKACEQTMButtonSetHidden(UIView *receiver, SEL selector, BOOL hidden
     if (!hidden) {
         NSString *key = YTKACEQTMButtonHideKey(receiver);
         if (key != nil && YTKACEFeatureEnabled(key) &&
-            YTKACEInsideRightNavigation(receiver)) hidden = YES;
+            YTKACEInsideHeaderBar(receiver)) hidden = YES;
     }
     ((void (*)(id, SEL, BOOL))OriginalQTMButtonSetHidden)(receiver, selector, hidden);
 }
@@ -554,7 +580,7 @@ static void YTKACEQTMButtonSetHidden(UIView *receiver, SEL selector, BOOL hidden
 static void YTKACEQTMButtonSetIdentifier(UIView *receiver, SEL selector, NSString *value) {
     ((void (*)(id, SEL, id))OriginalQTMButtonSetIdentifier)(receiver, selector, value);
     NSString *key = YTKACEQTMButtonHideKey(receiver);
-    if (key != nil && YTKACEFeatureEnabled(key) && YTKACEInsideRightNavigation(receiver)) {
+    if (key != nil && YTKACEFeatureEnabled(key) && YTKACEInsideHeaderBar(receiver)) {
         YTKACESetNavigationHidden(receiver, YES);
     }
 }
@@ -563,7 +589,7 @@ static void YTKACEQTMButtonDidMoveToWindow(UIView *receiver, SEL selector) {
     ((void (*)(id, SEL))OriginalQTMButtonDidMoveToWindow)(receiver, selector);
     if (receiver.window == nil) return;
     NSString *key = YTKACEQTMButtonHideKey(receiver);
-    if (key != nil && YTKACEFeatureEnabled(key) && YTKACEInsideRightNavigation(receiver)) {
+    if (key != nil && YTKACEFeatureEnabled(key) && YTKACEInsideHeaderBar(receiver)) {
         YTKACESetNavigationHidden(receiver, YES);
     }
 }
