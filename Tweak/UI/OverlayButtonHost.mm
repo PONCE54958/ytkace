@@ -1343,10 +1343,11 @@ void YTKACEOverlayButtonResized(UIButton *button) {
     dispatch_async(dispatch_get_main_queue(), ^{ [owner setNeedsLayout]; });
 }
 
-// Liquid Glass behind every YTKACE player button: the player's own buttons
-// are glass on iOS 26, so ours must match whether or not the YouTube player
-// surfaces are set to glass.
+// Liquid Glass behind each row, not each button: one capsule that grows and
+// shrinks with the icons the row has, so a button added later joins the same
+// surface. A row with nothing visible is hidden and draws no glass.
 static const void *YTKACEOverlayGlassAssociation = &YTKACEOverlayGlassAssociation;
+static const void *YTKACEOverlayRowGlassAssociation = &YTKACEOverlayRowGlassAssociation;
 static const void *YTKACEOverlayGlyphSourceAssociation = &YTKACEOverlayGlyphSourceAssociation;
 static const void *YTKACEOverlayGlyphResultAssociation = &YTKACEOverlayGlyphResultAssociation;
 
@@ -1394,36 +1395,87 @@ static void YTKACERefreshOverlayGlyph(UIButton *button) {
     [button setImage:glyph forState:UIControlStateNormal];
 }
 
-static void YTKACERefreshOverlayGlass(UIButton *button) {
-    if (button == nil) return;
-    UIVisualEffectView *glass = objc_getAssociatedObject(button, YTKACEOverlayGlassAssociation);
-    const BOOL wanted = YTKACELiquidGlassAvailable();
-    if (!wanted) {
-        if (glass != nil) {
-            [glass removeFromSuperview];
-            objc_setAssociatedObject(button, YTKACEOverlayGlassAssociation, nil,
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        return;
-    }
-    if (glass == nil) {
-        Class effectClass = NSClassFromString(@"UIGlassEffect");
-        SEL styleSelector = NSSelectorFromString(@"effectWithStyle:");
-        UIVisualEffect *effect = [effectClass respondsToSelector:styleSelector]
-            ? ((id (*)(id, SEL, NSInteger))objc_msgSend)(effectClass, styleSelector, 0)
-            : [effectClass new];
-        if (effect == nil) return;
-        glass = [[UIVisualEffectView alloc] initWithEffect:effect];
-        glass.userInteractionEnabled = NO;
-        glass.clipsToBounds = YES;
-        glass.layer.cornerCurve = kCACornerCurveContinuous;
-        objc_setAssociatedObject(button, YTKACEOverlayGlassAssociation, glass,
+static UIVisualEffectView *YTKACENewRowGlass(void) {
+    Class effectClass = NSClassFromString(@"UIGlassEffect");
+    if (effectClass == Nil) return nil;
+    SEL styleSelector = NSSelectorFromString(@"effectWithStyle:");
+    UIVisualEffect *effect = [effectClass respondsToSelector:styleSelector]
+        ? ((id (*)(id, SEL, NSInteger))objc_msgSend)(effectClass, styleSelector, 0)
+        : [effectClass new];
+    if (effect == nil) return nil;
+    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+    glass.userInteractionEnabled = NO;
+    glass.clipsToBounds = YES;
+    glass.layer.cornerCurve = kCACornerCurveContinuous;
+    glass.accessibilityElementsHidden = YES;
+    return glass;
+}
+
+// Builds made before glass moved to the row left a glass view inside each
+// button; drop those so the row's capsule is the only one.
+static void YTKACERemoveButtonGlass(UIButton *button) {
+    UIView *glass = objc_getAssociatedObject(button, YTKACEOverlayGlassAssociation);
+    if (glass == nil) return;
+    [glass removeFromSuperview];
+    objc_setAssociatedObject(button, YTKACEOverlayGlassAssociation, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+// YouTube's fullscreen bar already puts our row on its own frosted pill;
+// another capsule there would be a second glass sheet.
+static BOOL YTKACERowIsInFullscreenPill(UIStackView *row) {
+    return [NSStringFromClass(row.superview.class) isEqualToString:@"YTFullscreenActionsView"];
+}
+
+static void YTKACERefreshOverlayRowGlass(UIStackView *row) {
+    if (row == nil) return;
+    NSMutableArray<UIVisualEffectView *> *glasses =
+        objc_getAssociatedObject(row, YTKACEOverlayRowGlassAssociation);
+    if (glasses == nil) {
+        glasses = [NSMutableArray array];
+        objc_setAssociatedObject(row, YTKACEOverlayRowGlassAssociation, glasses,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    if (glass.superview != button) [button insertSubview:glass atIndex:0];
-    if (!CGRectEqualToRect(glass.frame, button.bounds)) glass.frame = button.bounds;
-    const CGFloat radius = MIN(CGRectGetWidth(button.bounds), CGRectGetHeight(button.bounds)) * 0.5;
-    if (glass.layer.cornerRadius != radius) glass.layer.cornerRadius = radius;
+    for (UIVisualEffectView *glass in glasses) [glass removeFromSuperview];
+    [glasses removeAllObjects];
+    for (UIView *item in row.arrangedSubviews) {
+        if ([item isKindOfClass:UIButton.class]) YTKACERemoveButtonGlass((UIButton *)item);
+    }
+    if (!YTKACELiquidGlassAvailable() || row.hidden || row.alpha < 0.05) return;
+    if (YTKACERowIsInFullscreenPill(row)) return;
+    [row layoutIfNeeded];
+
+    // Visible icons in the row's own coordinates. Runs stay together while
+    // they touch; a gap wide enough for a YouTube button starts a new capsule,
+    // so a row mixed with YouTube's buttons never covers them.
+    NSMutableArray<NSMutableArray<UIView *> *> *runs = [NSMutableArray array];
+    const BOOL vertical = row.axis == UILayoutConstraintAxisVertical;
+    for (UIView *item in row.arrangedSubviews) {
+        if (item.hidden || item.alpha < 0.05 || CGRectIsEmpty(item.frame)) continue;
+        NSMutableArray<UIView *> *run = runs.lastObject;
+        UIView *previous = run.lastObject;
+        const CGFloat gap = previous == nil ? 0.0
+            : (vertical ? CGRectGetMinY(item.frame) - CGRectGetMaxY(previous.frame)
+                        : CGRectGetMinX(item.frame) - CGRectGetMaxX(previous.frame));
+        if (run == nil || gap > 24.0) {
+            run = [NSMutableArray array];
+            [runs addObject:run];
+        }
+        [run addObject:item];
+    }
+
+    for (NSMutableArray<UIView *> *run in runs) {
+        CGRect surface = run.firstObject.frame;
+        for (UIView *item in run) surface = CGRectUnion(surface, item.frame);
+        if (CGRectIsEmpty(surface)) continue;
+        UIVisualEffectView *glass = YTKACENewRowGlass();
+        if (glass == nil) return;
+        glass.frame = surface;
+        glass.layer.cornerRadius = MIN(CGRectGetWidth(surface), CGRectGetHeight(surface)) * 0.5;
+        [row insertSubview:glass atIndex:0];
+        [row sendSubviewToBack:glass];
+        [glasses addObject:glass];
+    }
 }
 
 // YouTube hides the gear with the rest of the controls when they fade out,
@@ -1597,15 +1649,16 @@ static void YTKACEControlsOverlayLayout(UIView *receiver, SEL selector) {
     fullscreen.hidden = !YTKACELayoutFullscreenStack(receiver, fullscreen);
     stacks[YTKACEOverlayZoneMenu].hidden = YES;
 
-    // Glass follows the row geometry, so refresh it once the rows are placed;
-    // every glyph is redrawn to the same size here too.
+    // One glass capsule per row, sized to the icons it holds; glyphs are
+    // redrawn to the same size here too.
     for (NSString *zone in stacks) {
-        for (UIView *item in stacks[zone].arrangedSubviews) {
+        UIStackView *row = stacks[zone];
+        for (UIView *item in row.arrangedSubviews) {
             if ([item isKindOfClass:UIButton.class]) {
                 YTKACERefreshOverlayGlyph((UIButton *)item);
-                YTKACERefreshOverlayGlass((UIButton *)item);
             }
         }
+        YTKACERefreshOverlayRowGlass(row);
     }
 
     // Last, so the laptop-posture split moves the final positions.
