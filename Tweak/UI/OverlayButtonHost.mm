@@ -784,6 +784,10 @@ static void YTKACEStackGroups(UIStackView *stack, NSMutableArray<NSString *> *na
     for (UIView *view in stack.arrangedSubviews) {
         if (view.hidden) continue;
         NSString *group = objc_getAssociatedObject(view, YTKACEOverlayGroupAssociation) ?: @"";
+        // A text button (quality) changes width with its title; measure the
+        // laid-out button, not a size cached before the title changed.
+        [view setNeedsLayout];
+        [view layoutIfNeeded];
         // The row can squeeze a button; a text one's own width is its title's.
         const CGFloat width = ceil(MAX([view systemLayoutSizeFittingSize:UILayoutFittingCompressedSize].width,
                                        view.intrinsicContentSize.width));
