@@ -1584,13 +1584,16 @@ static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
         objc_setAssociatedObject(row, YTKACEOverlayRowGlassAssociation, glasses,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    for (UIVisualEffectView *glass in glasses) [glass removeFromSuperview];
-    [glasses removeAllObjects];
     for (UIView *item in row.arrangedSubviews) {
         if ([item isKindOfClass:UIButton.class]) YTKACERemoveButtonGlass((UIButton *)item);
     }
-    if (!YTKACELiquidGlassAvailable() || row.hidden || row.alpha < 0.05) return;
-    if (YTKACERowIsInFullscreenPill(row)) return;
+    BOOL keep = YTKACELiquidGlassAvailable() && !row.hidden &&
+        !YTKACERowIsInFullscreenPill(row) && row.window != nil;
+    if (!keep) {
+        for (UIVisualEffectView *glass in glasses) [glass removeFromSuperview];
+        [glasses removeAllObjects];
+        return;
+    }
     [row layoutIfNeeded];
 
     // One capsule for the whole row: the union of our icons plus the YouTube
@@ -1608,7 +1611,11 @@ static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
         surface = any ? CGRectUnion(surface, frame) : frame;
         any = YES;
     }
-    if (!any) return;
+    if (!any) {
+        for (UIVisualEffectView *glass in glasses) [glass removeFromSuperview];
+        [glasses removeAllObjects];
+        return;
+    }
 
     if ([zone isEqualToString:YTKACEOverlayZoneTop]) {
         NSDictionary *allStacks =
@@ -1634,14 +1641,28 @@ static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
     }
 
     if (CGRectIsEmpty(surface)) return;
-    UIVisualEffectView *glass = YTKACENewRowGlass();
-    if (glass == nil) return;
-    glass.frame = surface;
-    glass.alpha = row.alpha;
-    glass.layer.cornerRadius = MIN(CGRectGetWidth(surface), CGRectGetHeight(surface)) * 0.5;
-    [overlay insertSubview:glass atIndex:0];
+    // Reuse the capsule instead of rebuilding it on every layout pass: a new
+    // glass view would jump straight to the row's model alpha and skip the
+    // fade the buttons are running, so it appeared and vanished on its own.
+    UIVisualEffectView *glass = glasses.firstObject;
+    if (glass == nil) {
+        glass = YTKACENewRowGlass();
+        if (glass == nil) return;
+        CALayer *presentation = (CALayer *)row.layer.presentationLayer;
+        glass.alpha = presentation != nil ? presentation.opacity : row.alpha;
+        [glasses addObject:glass];
+    }
+    if (glass.superview != overlay) {
+        [glass removeFromSuperview];
+        [overlay insertSubview:glass atIndex:0];
+    }
     [overlay sendSubviewToBack:glass];
-    [glasses addObject:glass];
+    if (!CGRectEqualToRect(glass.frame, surface)) glass.frame = surface;
+    const CGFloat radius = MAX(0.0, MIN(CGRectGetWidth(surface), CGRectGetHeight(surface)) * 0.5);
+    if (fabs(glass.layer.cornerRadius - radius) > 0.25) glass.layer.cornerRadius = radius;
+    if (glass.layer.animationKeys.count == 0 && fabs(glass.alpha - row.alpha) > 0.001) {
+        glass.alpha = row.alpha;
+    }
 }
 
 // The overlay-level glass is not inside the row, so it does not fade with it
@@ -1656,16 +1677,30 @@ static void YTKACEAnimateRowGlass(UIView *row, BOOL visible) {
 // are still up. With Remove Settings off, put it back in that case only.
 static void YTKACERestoreSettingsButton(UIView *overlay) {
     if (overlay == nil || !YTKACENativeControlsVisible ||
+        overlay.hidden || overlay.alpha < 0.95 ||
         YTKACEFeatureEnabled(@"YTKACE.Preference.Overlay.MoreButtonHidden")) return;
+    NSMutableArray<UIView *> *buttons = [NSMutableArray array];
     for (NSString *name in @[@"overflowButton", @"settingsButton"]) {
         SEL selector = NSSelectorFromString(name);
         if (![overlay respondsToSelector:selector]) continue;
         id value = ((id (*)(id, SEL))objc_msgSend)(overlay, selector);
-        if (![value isKindOfClass:UIView.class]) continue;
-        UIView *button = value;
-        if (!button.hidden) continue;
+        if ([value isKindOfClass:UIView.class] && ![buttons containsObject:value]) [buttons addObject:value];
+    }
+    // The accessible gear can be a different view from the private one.
+    UIView *identified = YTKACEFindIdentified(overlay, @"id.player.overflow.button", @[], 0);
+    if (identified != nil && ![buttons containsObject:identified]) [buttons addObject:identified];
+    for (UIView *button in buttons) {
+        if (!button.hidden && button.alpha > 0.95) continue;
         button.hidden = NO;
+        button.alpha = 1.0;
         button.userInteractionEnabled = YES;
+        // YouTube (or a top-row layout) can hide the wrapper around it too.
+        for (UIView *parent = button.superview;
+             parent != nil && parent != overlay; parent = parent.superview) {
+            if (!parent.hidden && parent.alpha > 0.95) continue;
+            parent.hidden = NO;
+            parent.alpha = 1.0;
+        }
     }
 }
 

@@ -1559,6 +1559,10 @@ static void YTKACEFullscreenActionsLayout(UIView *receiver, SEL selector) {
     }
     YTKACEApplyHidden(receiver, YTKACEFullscreenActionsKey);
     if (!receiver.hidden) {
+        // The fullscreen bar is outside the controls overlay, so the overlay
+        // hide switches (cast, captions, autoplay, gear) never reached its
+        // icons. Sweep them here too.
+        YTKACEApplyOverlayTree(receiver);
         YTKACEApplyFullscreenBar(receiver);
         YTKACEFullscreenBarDidLayout(receiver);
     }
@@ -1569,6 +1573,7 @@ static void YTKACEFullscreenEngagementLayout(UIView *receiver, SEL selector) {
         ((void (*)(id, SEL))OriginalFullscreenEngagementLayout)(receiver, selector);
     }
     YTKACEApplyHidden(receiver, YTKACEFullscreenActionsKey);
+    if (!receiver.hidden) YTKACEApplyOverlayTree(receiver);
 }
 
 static CGFloat YTKACEFullscreenActionBarHeight(id receiver, SEL selector) {
