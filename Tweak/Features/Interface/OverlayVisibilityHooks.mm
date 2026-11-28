@@ -1553,6 +1553,81 @@ static void YTKACEApplyFullscreenBar(UIView *bar) {
     if (changed) YTKACEFullscreenRelayout(root);
 }
 
+static NSString *YTKACEFullscreenNativeName(UIView *view) {
+    NSString *identifier = view.accessibilityIdentifier;
+    if ([identifier isEqualToString:@"id.video.like.button"]) return @"Like";
+    if ([identifier isEqualToString:@"id.video.dislike.button"]) return @"Dislike";
+    if ([identifier isEqualToString:@"id.video.add_to.button"]) return @"Save";
+    if ([identifier isEqualToString:@"id.video.share.button"]) return @"Share";
+    return nil;
+}
+
+static const void *YTKACEFullscreenNativeHiddenKey =
+    &YTKACEFullscreenNativeHiddenKey;
+
+static void YTKACESetFullscreenNativeHidden(UIView *view, BOOL hide) {
+    if (hide) {
+        if (!view.hidden) {
+            objc_setAssociatedObject(view, YTKACEFullscreenNativeHiddenKey, @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        view.hidden = YES;
+    } else if ([objc_getAssociatedObject(view, YTKACEFullscreenNativeHiddenKey) boolValue]) {
+        view.hidden = NO;
+        objc_setAssociatedObject(view, YTKACEFullscreenNativeHiddenKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static void YTKACECollectFullscreenNative(UIView *view,
+                                          NSMutableDictionary<NSString *, UIView *> *known,
+                                          NSMutableArray<UIView *> *elements, int depth) {
+    if (depth > 14) return;
+    NSString *name = YTKACEFullscreenNativeName(view);
+    if (name != nil && known[name] == nil) known[name] = view;
+    // Comments, Ask and ⋯ share one id; their order names them later.
+    if ([view.accessibilityIdentifier isEqualToString:@"id.elements.button"]) {
+        [elements addObject:view];
+    }
+    for (UIView *subview in view.subviews) {
+        YTKACECollectFullscreenNative(subview, known, elements, depth + 1);
+    }
+}
+
+// The Elements bar collapses hidden buttons at the node level. When that does
+// not reach a button (YouTube rebuilt it, the shared Ask id was named
+// differently), hide the drawn control too so the setting always shows.
+static void YTKACEApplyFullscreenNativeVisibility(UIView *bar) {
+    if (bar == nil) return;
+    NSMutableDictionary<NSString *, UIView *> *known = [NSMutableDictionary dictionary];
+    NSMutableArray<UIView *> *elements = [NSMutableArray array];
+    YTKACECollectFullscreenNative(bar, known, elements, 0);
+    for (NSString *name in known) {
+        BOOL hide = YTKACEFeatureEnabled(
+            [NSString stringWithFormat:@"YTKACE.Preference.Fullscreen.%@Hidden", name]);
+        YTKACESetFullscreenNativeHidden(known[name], hide);
+    }
+    if (elements.count == 0) return;
+    [elements sortUsingComparator:^NSComparisonResult(UIView *left, UIView *right) {
+        const CGFloat a = [left convertRect:left.bounds toView:bar].origin.x;
+        const CGFloat b = [right convertRect:right.bounds toView:bar].origin.x;
+        return [@(a) compare:@(b)];
+    }];
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (NSString *name in YTKACEFullscreenBarNames() ?: @[]) {
+        if ([@[@"Like", @"Dislike", @"Save", @"Share"] containsObject:name]) continue;
+        [names addObject:[name isEqualToString:@"?"] ? @"" : name];
+    }
+    if (names.count != elements.count) return;
+    for (NSUInteger index = 0; index < elements.count; index++) {
+        NSString *name = names[index];
+        if (name.length == 0) continue;
+        BOOL hide = YTKACEFeatureEnabled(
+            [NSString stringWithFormat:@"YTKACE.Preference.Fullscreen.%@Hidden", name]);
+        YTKACESetFullscreenNativeHidden(elements[index], hide);
+    }
+}
+
 static void YTKACEFullscreenActionsLayout(UIView *receiver, SEL selector) {
     if (OriginalFullscreenActionsLayout != NULL) {
         ((void (*)(id, SEL))OriginalFullscreenActionsLayout)(receiver, selector);
@@ -1564,6 +1639,7 @@ static void YTKACEFullscreenActionsLayout(UIView *receiver, SEL selector) {
         // icons. Sweep them here too.
         YTKACEApplyOverlayTree(receiver);
         YTKACEApplyFullscreenBar(receiver);
+        YTKACEApplyFullscreenNativeVisibility(receiver);
         YTKACEFullscreenBarDidLayout(receiver);
     }
 }
@@ -1573,7 +1649,10 @@ static void YTKACEFullscreenEngagementLayout(UIView *receiver, SEL selector) {
         ((void (*)(id, SEL))OriginalFullscreenEngagementLayout)(receiver, selector);
     }
     YTKACEApplyHidden(receiver, YTKACEFullscreenActionsKey);
-    if (!receiver.hidden) YTKACEApplyOverlayTree(receiver);
+    if (!receiver.hidden) {
+        YTKACEApplyOverlayTree(receiver);
+        YTKACEApplyFullscreenNativeVisibility(receiver);
+    }
 }
 
 static CGFloat YTKACEFullscreenActionBarHeight(id receiver, SEL selector) {

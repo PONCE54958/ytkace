@@ -1523,9 +1523,9 @@ static void YTKACECollectBandControls(UIView *view, UIView *overlay, NSArray<UIV
     if ([view isKindOfClass:UIControl.class] || [name containsString:@"Button"] ||
         [name containsString:@"Switch"] || [name containsString:@"Toggle"]) {
         const CGRect frame = [view convertRect:view.bounds toView:overlay];
-        if (CGRectGetWidth(frame) > 4.0 && CGRectGetWidth(frame) < 140.0 &&
-            fabs(CGRectGetMidY(frame) - rowY) < 14.0 &&
-            CGRectGetMidX(frame) > CGRectGetWidth(overlay.bounds) * 0.4 &&
+        if (CGRectGetWidth(frame) > 4.0 && CGRectGetWidth(frame) < 100.0 &&
+            fabs(CGRectGetMidY(frame) - rowY) < 20.0 &&
+            CGRectGetMidX(frame) > CGRectGetWidth(overlay.bounds) * 0.35 &&
             YTKACEViewShown(view)) {
             [found addObject:view];
         }
@@ -1579,6 +1579,46 @@ static void YTKACEUnionGlassAround(UIView *view, UIView *overlay, CGRect around,
     }
 }
 
+// The circle YouTube draws behind its fullscreen button is glass too. When
+// the bottom row takes that button into its capsule, the native circle has to
+// go or the row shows two glass surfaces on the same spot.
+static const void *YTKACENativeGlassHiddenKey = &YTKACENativeGlassHiddenKey;
+static const void *YTKACENativeGlassAlphaKey = &YTKACENativeGlassAlphaKey;
+
+static void YTKACEHideNativeGlass(UIView *view, UIView *overlay, CGRect around,
+                                  int depth) {
+    if (depth > 10 || view.hidden) return;
+    const NSString *name = NSStringFromClass(view.class);
+    const CGRect frame = [view convertRect:view.bounds toView:overlay];
+    if ([name containsString:@"Glass"] && !CGRectIsEmpty(frame) &&
+        CGRectGetWidth(frame) < 140.0 && CGRectGetHeight(frame) < 140.0 &&
+        CGRectIntersectsRect(frame, CGRectInset(around, -8.0, -8.0))) {
+        if (objc_getAssociatedObject(view, YTKACENativeGlassHiddenKey) == nil) {
+            objc_setAssociatedObject(view, YTKACENativeGlassAlphaKey, @(view.alpha),
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(view, YTKACENativeGlassHiddenKey, @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        view.alpha = 0.0;
+    }
+    for (UIView *subview in view.subviews) {
+        YTKACEHideNativeGlass(subview, overlay, around, depth + 1);
+    }
+}
+
+static void YTKACERestoreNativeGlass(UIView *view) {
+    if (objc_getAssociatedObject(view, YTKACENativeGlassHiddenKey) != nil) {
+        NSNumber *alpha = objc_getAssociatedObject(view, YTKACENativeGlassAlphaKey);
+        view.alpha = alpha != nil ? alpha.doubleValue : 1.0;
+        objc_setAssociatedObject(view, YTKACENativeGlassHiddenKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    for (UIView *subview in view.subviews) YTKACERestoreNativeGlass(subview);
+}
+
+// The capsule lives on the player overlay so YouTube's own icons stay sharp
+// on top of it. Build its surface from the row's visible icons plus the
+// native ones that share the same line, and drop it when nothing is left.
 static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
     if (row == nil) return;
     NSMutableArray<UIVisualEffectView *> *glasses =
@@ -1588,11 +1628,23 @@ static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
         objc_setAssociatedObject(row, YTKACEOverlayRowGlassAssociation, glasses,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    UIView *overlay = objc_getAssociatedObject(row, YTKACEOverlayOwnerAssociation) ?: row.superview;
+    if (overlay == nil) return;
+    const BOOL top = [zone isEqualToString:YTKACEOverlayZoneTop];
+    const BOOL bottom = [zone isEqualToString:YTKACEOverlayZoneBottom];
+    if (bottom) {
+        YTKACERestoreNativeGlass(overlay);
+        if (overlay.superview != nil) YTKACERestoreNativeGlass(overlay.superview);
+    }
     for (UIView *item in row.arrangedSubviews) {
         if ([item isKindOfClass:UIButton.class]) YTKACERemoveButtonGlass((UIButton *)item);
     }
-    BOOL keep = YTKACELiquidGlassAvailable() && !row.hidden &&
-        !YTKACERowIsInFullscreenPill(row) && row.window != nil;
+    // The top row also carries YouTube's own activated buttons (cast,
+    // captions, autoplay, gear), so it draws glass even when none of YTKACE's
+    // buttons live there.
+    BOOL keep = YTKACELiquidGlassAvailable() &&
+        !YTKACERowIsInFullscreenPill(row) && row.window != nil &&
+        (!row.hidden || top);
     if (!keep) {
         for (UIVisualEffectView *glass in glasses) [glass removeFromSuperview];
         [glasses removeAllObjects];
@@ -1600,12 +1652,6 @@ static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
     }
     [row layoutIfNeeded];
 
-    // One capsule for the whole row: the union of our icons plus the YouTube
-    // ones that share the row. It lives on the overlay, below every button,
-    // so YouTube's cast and captions icons stay sharp on top of the glass
-    // instead of being blurred by a surface inside our row.
-    UIView *overlay = objc_getAssociatedObject(row, YTKACEOverlayOwnerAssociation) ?: row.superview;
-    if (overlay == nil) return;
     BOOL any = NO;
     CGRect surface = CGRectZero;
     for (UIView *item in row.arrangedSubviews) {
@@ -1615,36 +1661,53 @@ static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
         surface = any ? CGRectUnion(surface, frame) : frame;
         any = YES;
     }
-    if (!any) {
-        for (UIVisualEffectView *glass in glasses) [glass removeFromSuperview];
-        [glasses removeAllObjects];
-        return;
-    }
 
-    if ([zone isEqualToString:YTKACEOverlayZoneTop]) {
-        NSDictionary *allStacks =
-            objc_getAssociatedObject(overlay, YTKACEOverlayZoneStacksAssociation);
+    if (top) {
+        // The four buttons YouTube keeps in the top row, by identifier, so a
+        // renamed internal view can't leave the capsule short.
+        for (NSString *identifier in YTKACENativeTopIdentifiers().allValues) {
+            UIView *native = YTKACEFindIdentified(overlay, identifier, @[], 0);
+            if (native == nil || !YTKACEViewShown(native)) continue;
+            const CGRect frame = [native convertRect:native.bounds toView:overlay];
+            if (CGRectIsEmpty(frame)) continue;
+            surface = any ? CGRectUnion(surface, frame) : frame;
+            any = YES;
+        }
         const CGRect rowFrame = [row convertRect:row.bounds toView:overlay];
         NSMutableArray<UIView *> *band = [NSMutableArray array];
+        NSDictionary *allStacks =
+            objc_getAssociatedObject(overlay, YTKACEOverlayZoneStacksAssociation);
         YTKACECollectBandControls(overlay, overlay, allStacks.allValues,
                                   CGRectGetMidY(rowFrame), band, 0);
         for (UIView *native in band) {
-            surface = CGRectUnion(surface, [native convertRect:native.bounds toView:overlay]);
+            const CGRect frame = [native convertRect:native.bounds toView:overlay];
+            if (CGRectIsEmpty(frame) || CGRectGetWidth(frame) > 100.0) continue;
+            surface = any ? CGRectUnion(surface, frame) : frame;
+            any = YES;
         }
-    } else if ([zone isEqualToString:YTKACEOverlayZoneBottom]) {
+    } else if (bottom) {
         UIView *fullscreen = YTKACEFullscreenButtonNearRow(overlay, row) ?:
             YTKACEFullscreenAnchor(overlay.superview ?: overlay);
         if (fullscreen != nil && YTKACEViewShown(fullscreen)) {
             const CGRect frame = [fullscreen convertRect:fullscreen.bounds toView:overlay];
             if (!CGRectIsEmpty(frame) && CGRectIntersectsRect(frame, overlay.bounds)) {
-                surface = CGRectUnion(surface, CGRectInset(frame, -2.0, -2.0));
+                surface = any ? CGRectUnion(surface, frame) : frame;
+                any = YES;
                 YTKACEUnionGlassAround(overlay, overlay, frame, &surface, 0);
                 YTKACEUnionGlassAround(overlay.superview ?: overlay, overlay, frame, &surface, 0);
+                YTKACEHideNativeGlass(overlay, overlay, frame, 0);
+                if (overlay.superview != nil) {
+                    YTKACEHideNativeGlass(overlay.superview, overlay, frame, 0);
+                }
             }
         }
     }
 
-    if (CGRectIsEmpty(surface)) return;
+    if (!any || CGRectIsEmpty(surface)) {
+        for (UIVisualEffectView *glass in glasses) [glass removeFromSuperview];
+        [glasses removeAllObjects];
+        return;
+    }
     // Reuse the capsule instead of rebuilding it on every layout pass: a new
     // glass view would jump straight to the row's model alpha and skip the
     // fade the buttons are running, so it appeared and vanished on its own.
@@ -1652,8 +1715,7 @@ static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
     if (glass == nil) {
         glass = YTKACENewRowGlass();
         if (glass == nil) return;
-        CALayer *presentation = (CALayer *)row.layer.presentationLayer;
-        glass.alpha = presentation != nil ? presentation.opacity : row.alpha;
+        glass.alpha = row.alpha;
         [glasses addObject:glass];
     }
     if (glass.superview != overlay) {
