@@ -17,6 +17,8 @@ static IMP OriginalVideoSetControlsVisible;
 static IMP OriginalControlsSetHidden;
 static IMP OriginalControlsHitTest;
 static IMP OriginalPlayerBarHitTest;
+static IMP OriginalPlayerBarSetAlpha;
+static IMP OriginalPlayerBarSetHidden;
 static NSHashTable<UIStackView *> *YTKACEBottomStacks;
 static NSHashTable<UIStackView *> *YTKACEFullscreenStacks;
 static IMP OriginalFullscreenActionsHitTest;
@@ -34,7 +36,10 @@ static const void *YTKACEOverlayRetryAssociation = &YTKACEOverlayRetryAssociatio
 static NSString *YTKACECurrentOverlayGroup;
 static NSMutableArray<NSDictionary *> *YTKACEOverlayConfigurators;
 static BOOL YTKACENativeControlsVisible = YES;
+static const void *YTKACEOverlayRowGlassAssociation = &YTKACEOverlayRowGlassAssociation;
 static void YTKACEAnimateRowGlass(UIView *row, BOOL visible);
+static void YTKACEPlayerBarSetAlpha(UIView *receiver, SEL selector, CGFloat alpha);
+static void YTKACEPlayerBarSetHidden(UIView *receiver, SEL selector, BOOL hidden);
 
 static void YTKACEFindSettingsControlInView(UIView *view,
                                             UIView *excluded,
@@ -219,7 +224,14 @@ static void YTKACESetHostedControlsHidden(UIView *view, BOOL hidden) {
             [view.superview setNeedsLayout];
         }
         NSTimeInterval duration = [UIView inheritedAnimationDuration];
-        if (duration <= 0.0 || duration > 1.0) duration = 0.20;
+        if (duration < 0.0 || duration > 1.0) duration = 0.0;
+        if (duration <= 0.0) {
+            // YouTube changed its controls outside an animation: match that
+            // instead of adding a fade of our own, so the rows leave with it.
+            view.alpha = visible ? 1.0 : 0.0;
+            YTKACEAnimateRowGlass(view, visible);
+            return;
+        }
         [UIView animateWithDuration:duration
                               delay:0.0
                             options:UIViewAnimationOptionBeginFromCurrentState |
@@ -557,6 +569,10 @@ static NSDictionary<NSString *, UIStackView *> *YTKACEZoneStacks(UIView *overlay
         YTKACEBottomStacks = [NSHashTable weakObjectsHashTable];
         YTKACEInstallInstanceHook(@"YTInlinePlayerBarContainerView", @"hitTest:withEvent:",
                                   (IMP)YTKACEPlayerBarHitTest, &OriginalPlayerBarHitTest);
+        YTKACEInstallInstanceHook(@"YTInlinePlayerBarContainerView", @"setAlpha:",
+                                  (IMP)YTKACEPlayerBarSetAlpha, &OriginalPlayerBarSetAlpha);
+        YTKACEInstallInstanceHook(@"YTInlinePlayerBarContainerView", @"setHidden:",
+                                  (IMP)YTKACEPlayerBarSetHidden, &OriginalPlayerBarSetHidden);
     }
     [YTKACEBottomStacks addObject:stacks[YTKACEOverlayZoneBottom]];
     objc_setAssociatedObject(overlay, YTKACEOverlayZoneStacksAssociation, stacks,
@@ -576,6 +592,35 @@ static UIView *YTKACEPlayerBarHitTest(UIView *receiver, SEL selector, CGPoint po
         if (hit != nil && hit != stack) return hit;
     }
     return ((UIView *(*)(id, SEL, CGPoint, UIEvent *))OriginalPlayerBarHitTest)(receiver, selector, point, event);
+}
+
+// The bottom row is a sibling of YouTube's inline player bar, so it does not
+// fade with the bar on its own. Copy the bar's alpha onto the row (and its
+// glass) while the bar animates, so both leave and return together.
+static void YTKACEApplyBottomRowAlpha(CGFloat alpha) {
+    if (YTKACEKeepControlsVisible()) return;
+    if (!YTKACENativeControlsVisible) alpha = 0.0;
+    for (UIStackView *stack in YTKACEBottomStacks.allObjects) {
+        stack.alpha = alpha;
+        stack.userInteractionEnabled = alpha > 0.05 && !stack.hidden;
+        NSArray *glasses = objc_getAssociatedObject(stack, YTKACEOverlayRowGlassAssociation);
+        for (UIView *glass in glasses) glass.alpha = alpha;
+    }
+}
+
+static void YTKACEPlayerBarSetAlpha(UIView *receiver, SEL selector, CGFloat alpha) {
+    if (OriginalPlayerBarSetAlpha != NULL) {
+        ((void (*)(id, SEL, CGFloat))OriginalPlayerBarSetAlpha)(receiver, selector, alpha);
+    }
+    YTKACEApplyBottomRowAlpha(alpha);
+}
+
+static void YTKACEPlayerBarSetHidden(UIView *receiver, SEL selector, BOOL hidden) {
+    if (OriginalPlayerBarSetHidden != NULL) {
+        ((void (*)(id, SEL, BOOL))OriginalPlayerBarSetHidden)(receiver, selector, hidden);
+    }
+    CGFloat alpha = hidden ? 0.0 : receiver.alpha;
+    YTKACEApplyBottomRowAlpha(alpha);
 }
 
 // YouTube's fullscreen bar can sit over our row there; hand taps on it back.
@@ -797,7 +842,7 @@ static const void *YTKACETopPinAssociation = &YTKACETopPinAssociation;
 static const void *YTKACETopMetricsAssociation = &YTKACETopMetricsAssociation;
 static NSHashTable<UIView *> *YTKACEPinnedTopItems;
 typedef struct { Class cls; IMP frame; IMP center; } YTKACEPinHook;
-static YTKACEPinHook YTKACEPinHooks[8];
+static YTKACEPinHook YTKACEPinHooks[16];
 static int YTKACEPinHookCount;
 
 static IMP YTKACEPinOriginal(id view, BOOL center) {
@@ -833,16 +878,16 @@ static void YTKACEPinnedSetCenter(UIView *view, SEL selector, CGPoint center) {
     if (original != NULL) ((void (*)(id, SEL, CGPoint))original)(view, selector, center);
 }
 
-static void YTKACEPinTopItem(UIView *item, CGFloat x) {
+static BOOL YTKACEPinTopItem(UIView *item, CGFloat x) {
     Class cls = object_getClass(item);
     BOOL hooked = NO;
     for (int index = 0; index < YTKACEPinHookCount; index++) hooked = hooked || YTKACEPinHooks[index].cls == cls;
     if (!hooked) {
-        if (YTKACEPinHookCount >= 8) return;
+        if (YTKACEPinHookCount >= 16) return NO;
         YTKACEPinHook *hook = &YTKACEPinHooks[YTKACEPinHookCount];
         NSString *name = NSStringFromClass(cls);
         if (!YTKACEInstallInstanceHook(name, @"setFrame:", (IMP)YTKACEPinnedSetFrame, &hook->frame) ||
-            !YTKACEInstallInstanceHook(name, @"setCenter:", (IMP)YTKACEPinnedSetCenter, &hook->center)) return;
+            !YTKACEInstallInstanceHook(name, @"setCenter:", (IMP)YTKACEPinnedSetCenter, &hook->center)) return NO;
         hook->cls = cls;
         YTKACEPinHookCount++;
     }
@@ -852,6 +897,7 @@ static void YTKACEPinTopItem(UIView *item, CGFloat x) {
     objc_setAssociatedObject(item, YTKACETopPinAssociation,
                              [NSValue valueWithCGPoint:CGPointMake(CGRectGetWidth(item.superview.bounds) - x - width, width)],
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return YES;
 }
 
 static void YTKACEUnpinTopItem(UIView *item) {
@@ -868,7 +914,7 @@ static void YTKACEUnpinTopRow(UIView *overlay) {
     }
 }
 
-static void YTKACEMoveNativeTopItem(UIView *item, UIView *container, NSArray<UIView *> *items, CGFloat x) {
+static BOOL YTKACEMoveNativeTopItem(UIView *item, UIView *container, NSArray<UIView *> *items, CGFloat x) {
     const CGRect old = item.frame;
     CGRect frame = old;
     frame.origin.x = x;
@@ -882,9 +928,22 @@ static void YTKACEMoveNativeTopItem(UIView *item, UIView *container, NSArray<UIV
             [UIView performWithoutAnimation:^{ sibling.frame = moved; }];
         }
     }
-    // Not animated along with the controls fading in.
-    YTKACEPinTopItem(item, x);
+    // Not animated along with the controls fading in. Without a pin YouTube
+    // would put the button back on its next layout, on top of another one.
+    if (!YTKACEPinTopItem(item, x)) return NO;
     [UIView performWithoutAnimation:^{ item.frame = frame; }];
+    return YES;
+}
+
+static BOOL YTKACETopItemsOverlap(NSArray<UIView *> *items) {
+    for (NSUInteger left = 0; left < items.count; left++) {
+        for (NSUInteger right = left + 1; right < items.count; right++) {
+            const CGRect overlap = CGRectIntersection(items[left].frame, items[right].frame);
+            if (!CGRectIsNull(overlap) &&
+                CGRectGetWidth(overlap) > 0.5 && CGRectGetHeight(overlap) > 0.5) return YES;
+        }
+    }
+    return NO;
 }
 
 // With some of YTKACE's top buttons saved between YouTube's, YouTube's are
@@ -963,9 +1022,20 @@ static void YTKACEOrderNativeTopRow(UIView *overlay, NSArray<UIView *> *skip, UI
     CGFloat right = CGRectGetWidth(container.bounds) - metrics.CGPointValue.x;
     const CGFloat gap = metrics.CGPointValue.y;
     if (!mixed) {
+        BOOL placed = YES;
         for (UIView *item in visible.reverseObjectEnumerator) {
-            YTKACEMoveNativeTopItem(item, container, items.allValues, right - CGRectGetWidth(item.frame));
+            if (!YTKACEMoveNativeTopItem(item, container, items.allValues,
+                                         right - CGRectGetWidth(item.frame))) {
+                placed = NO;
+                break;
+            }
             right = CGRectGetMinX(item.frame) - gap;
+        }
+        // A button that could not be pinned would snap back over another
+        // one; fall back to YouTube's row instead of leaving the overlap.
+        if (!placed || YTKACETopItemsOverlap(visible)) {
+            objc_setAssociatedObject(top, YTKACETopSlotsAssociation, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            YTKACEUnpinTopRow(overlay);
         }
         return;
     }
@@ -984,10 +1054,15 @@ static void YTKACEOrderNativeTopRow(UIView *overlay, NSArray<UIView *> *skip, UI
     }
     const CGFloat midY = CGRectGetMidY(visible.firstObject.frame);
     NSMutableDictionary<NSString *, NSValue *> *slotByName = [NSMutableDictionary dictionary];
+    BOOL placed = YES;
     for (NSString *name in sequence.reverseObjectEnumerator) {
         UIView *item = items[name];
         if (item != nil) {
-            YTKACEMoveNativeTopItem(item, container, items.allValues, right - CGRectGetWidth(item.frame));
+            if (!YTKACEMoveNativeTopItem(item, container, items.allValues,
+                                         right - CGRectGetWidth(item.frame))) {
+                placed = NO;
+                break;
+            }
             right = CGRectGetMinX(item.frame) - gap;
             continue;
         }
@@ -1003,11 +1078,17 @@ static void YTKACEOrderNativeTopRow(UIView *overlay, NSArray<UIView *> *skip, UI
     for (NSString *name in names) {
         NSValue *slot = slotByName[name];
         // The row's own order has to match the saved one.
-        if (slot == nil || (slots.count != 0 && CGRectGetMinX(slot.CGRectValue) <= CGRectGetMinX(slots.lastObject.CGRectValue))) {
+        if (!placed || slot == nil || (slots.count != 0 && CGRectGetMinX(slot.CGRectValue) <= CGRectGetMinX(slots.lastObject.CGRectValue))) {
             objc_setAssociatedObject(top, YTKACETopSlotsAssociation, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (!placed) YTKACEUnpinTopRow(overlay);
             return;
         }
         [slots addObject:slot];
+    }
+    if (YTKACETopItemsOverlap(visible)) {
+        objc_setAssociatedObject(top, YTKACETopSlotsAssociation, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        YTKACEUnpinTopRow(overlay);
+        return;
     }
     objc_setAssociatedObject(top, YTKACETopSlotsAssociation, @[slots, widths, lastViews], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
@@ -1349,7 +1430,6 @@ void YTKACEOverlayButtonResized(UIButton *button) {
 // shrinks with the icons the row has, so a button added later joins the same
 // surface. A row with nothing visible is hidden and draws no glass.
 static const void *YTKACEOverlayGlassAssociation = &YTKACEOverlayGlassAssociation;
-static const void *YTKACEOverlayRowGlassAssociation = &YTKACEOverlayRowGlassAssociation;
 static const void *YTKACEOverlayGlyphSourceAssociation = &YTKACEOverlayGlyphSourceAssociation;
 static const void *YTKACEOverlayGlyphResultAssociation = &YTKACEOverlayGlyphResultAssociation;
 
@@ -1451,6 +1531,50 @@ static void YTKACECollectBandControls(UIView *view, UIView *overlay, NSArray<UIV
     }
 }
 
+// The fullscreen button that belongs to this bottom row: on its line and to
+// its right. A faded duplicate elsewhere would otherwise drag the capsule
+// away from the button the user sees.
+static UIView *YTKACEFullscreenButtonNearRow(UIView *overlay, UIStackView *row) {
+    NSMutableArray<UIView *> *found = [NSMutableArray array];
+    YTKACECollectFullscreenButtons(overlay, found);
+    if (found.count == 0) {
+        YTKACECollectFullscreenButtons(overlay.superview ?: overlay, found);
+    }
+    const CGRect rowFrame = [row convertRect:row.bounds toView:overlay];
+    UIView *best = nil;
+    CGFloat bestDistance = CGFLOAT_MAX;
+    for (UIView *view in found) {
+        if (!YTKACEViewShown(view) || view.window != overlay.window) continue;
+        const CGRect frame = [view convertRect:view.bounds toView:overlay];
+        if (CGRectIsEmpty(frame) || !CGRectIntersectsRect(frame, overlay.bounds)) continue;
+        if (CGRectGetMidX(frame) < CGRectGetMinX(rowFrame) - 8.0) continue;
+        const CGFloat distance = fabs(CGRectGetMidY(frame) - CGRectGetMidY(rowFrame));
+        if (distance > 56.0) continue;
+        if (distance < bestDistance) {
+            best = view;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
+// The glass YouTube draws around a native button (the fullscreen circle).
+// The row's capsule has to reach it, or the two surfaces read as separate.
+static void YTKACEUnionGlassAround(UIView *view, UIView *overlay, CGRect around,
+                                   CGRect *surface, int depth) {
+    if (depth > 10 || view.hidden) return;
+    NSString *name = NSStringFromClass(view.class);
+    if ([name containsString:@"Glass"] && CGRectGetWidth(view.bounds) > 1.0) {
+        const CGRect frame = [view convertRect:view.bounds toView:overlay];
+        if (CGRectIntersectsRect(frame, CGRectInset(around, -16.0, -16.0))) {
+            *surface = CGRectUnion(*surface, frame);
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        YTKACEUnionGlassAround(subview, overlay, around, surface, depth + 1);
+    }
+}
+
 static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
     if (row == nil) return;
     NSMutableArray<UIVisualEffectView *> *glasses =
@@ -1497,9 +1621,15 @@ static void YTKACERefreshOverlayRowGlass(UIStackView *row, NSString *zone) {
             surface = CGRectUnion(surface, [native convertRect:native.bounds toView:overlay]);
         }
     } else if ([zone isEqualToString:YTKACEOverlayZoneBottom]) {
-        UIView *fullscreen = YTKACEFullscreenAnchor(overlay.superview ?: overlay);
+        UIView *fullscreen = YTKACEFullscreenButtonNearRow(overlay, row) ?:
+            YTKACEFullscreenAnchor(overlay.superview ?: overlay);
         if (fullscreen != nil && YTKACEViewShown(fullscreen)) {
-            surface = CGRectUnion(surface, [fullscreen convertRect:fullscreen.bounds toView:overlay]);
+            const CGRect frame = [fullscreen convertRect:fullscreen.bounds toView:overlay];
+            if (!CGRectIsEmpty(frame) && CGRectIntersectsRect(frame, overlay.bounds)) {
+                surface = CGRectUnion(surface, CGRectInset(frame, -2.0, -2.0));
+                YTKACEUnionGlassAround(overlay, overlay, frame, &surface, 0);
+                YTKACEUnionGlassAround(overlay.superview ?: overlay, overlay, frame, &surface, 0);
+            }
         }
     }
 
@@ -1563,13 +1693,51 @@ static UIView *YTKACEControlUnderPoint(UIView *view, UIView *overlay, CGPoint po
     return nil;
 }
 
+// A real button of YouTube's top row under the point. Cast and autoplay can
+// be covered by one of our wrappers while they fade in; their own tap target
+// has to win so pressing them keeps working.
+static UIView *YTKACENativeTopControlAtPoint(UIView *overlay, CGPoint point) {
+    NSDictionary<NSString *, NSString *> *identifiers = YTKACENativeTopIdentifiers();
+    UIView *best = nil;
+    CGFloat bestArea = CGFLOAT_MAX;
+    for (NSString *name in identifiers) {
+        UIView *view = YTKACEFindIdentified(overlay, identifiers[name], @[], 0);
+        if (view == nil || view.hidden || view.alpha < 0.05 ||
+            !YTKACEViewShown(view) || view.window != overlay.window) continue;
+        const CGPoint local = [view convertPoint:point fromView:overlay];
+        if (![view pointInside:local withEvent:nil]) continue;
+        UIView *target = [view hitTest:local withEvent:nil] ?: view;
+        const CGFloat area = CGRectGetWidth(view.bounds) * CGRectGetHeight(view.bounds);
+        if (target != nil && area < bestArea) {
+            best = target;
+            bestArea = area;
+        }
+    }
+    return best;
+}
+
 // Reordering the top row pins YouTube's buttons in place; a leftover view at
 // the old spot can sit over the visible button and eat its tap. When the hit
 // view is not interactive, hand the tap to the control drawn under it.
 static UIView *YTKACEControlsHitTest(UIView *receiver, SEL selector, CGPoint point, UIEvent *event) {
     UIView *hit = ((UIView *(*)(id, SEL, CGPoint, UIEvent *))OriginalControlsHitTest)(
         receiver, selector, point, event);
-    if (hit == nil || hit == receiver || YTKACEViewTakesTouches(hit)) return hit;
+    const BOOL topBand = point.y <= CGRectGetHeight(receiver.bounds) * 0.40;
+    if (topBand) {
+        UIView *native = YTKACENativeTopControlAtPoint(receiver, point);
+        if (native != nil &&
+            native != hit && ![hit isDescendantOfView:native]) {
+            return native;
+        }
+    }
+    if (hit == nil || hit == receiver) {
+        if (topBand) {
+            UIView *control = YTKACEControlUnderPoint(receiver, receiver, point, 0);
+            if (control != nil) return control;
+        }
+        return hit;
+    }
+    if (YTKACEViewTakesTouches(hit)) return hit;
     if (point.y > CGRectGetHeight(receiver.bounds) * 0.35) return hit;
     UIView *control = YTKACEControlUnderPoint(receiver, receiver, point, 0);
     return control != nil ? control : hit;
